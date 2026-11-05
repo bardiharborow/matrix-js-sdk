@@ -566,6 +566,111 @@ describe("SlidingSyncSdk", () => {
                         assertTimelineEvents(gotRoom!.getLiveTimeline().getEvents(), timeline);
                     },
                 );
+
+                describe("senders of history from a larger timeline_limit", () => {
+                    const bob = "@bob:localhost";
+                    const carol = "@carol:localhost";
+                    const mkMessage = (roomId: string, sender: string): IRoomEvent => ({
+                        ...mkOwnEvent(EventType.RoomMessage, { body: "hello" }),
+                        sender,
+                        room_id: roomId,
+                    });
+                    const mkMember = (roomId: string, userId: string, displayname: string): IStateEvent => ({
+                        ...mkOwnStateEvent(
+                            EventType.RoomMember,
+                            { membership: KnownMembership.Join, displayname },
+                            userId,
+                        ),
+                        sender: userId,
+                        room_id: roomId,
+                    });
+                    const getSender = (room: Room, eventId: string) => {
+                        const sender = room.findEventById(eventId)!.sender!;
+                        return { name: sender.name, hasMemberEvent: !!sender.events.member };
+                    };
+
+                    // Regression test for https://github.com/matrix-org/matrix-js-sdk/issues/5664
+                    it("uses members from required_state for history before the live timeline", async () => {
+                        const roomId = "!expanded_senders_live:localhost";
+                        const create = mkOwnStateEvent(EventType.RoomCreate, { creator: selfUserId });
+                        const fromBob = mkMessage(roomId, bob);
+                        const fromCarol = mkMessage(roomId, carol);
+
+                        mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                            timeline: [fromCarol],
+                            required_state: [create, mkMember(roomId, carol, "Carol")],
+                            name: "Expanded senders",
+                            initial: true,
+                        });
+                        await emitPromise(client!, ClientEvent.Room);
+                        mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                            timeline: [fromBob, fromCarol],
+                            required_state: [create, mkMember(roomId, bob, "Bob"), mkMember(roomId, carol, "Carol")],
+                            name: "Expanded senders",
+                            expanded_timeline: true,
+                        });
+                        await flushPromises();
+
+                        const room = client!.getRoom(roomId)!;
+                        expect(getSender(room, fromBob.event_id)).toEqual({ name: "Bob", hasMemberEvent: true });
+                        expect(getSender(room, fromCarol.event_id)).toEqual({ name: "Carol", hasMemberEvent: true });
+                    });
+
+                    // Regression test for https://github.com/matrix-org/matrix-js-sdk/issues/5664
+                    it("uses members from required_state for history joined to a timeline from /context", async () => {
+                        const roomId = "!expanded_senders_context:localhost";
+                        const create = mkOwnStateEvent(EventType.RoomCreate, { creator: selfUserId });
+                        const olderFromBob = mkMessage(roomId, bob);
+                        const olderFromCarol = mkMessage(roomId, carol);
+                        const fromBob = mkMessage(roomId, bob);
+                        const fromCarol = mkMessage(roomId, carol);
+
+                        // the room needs timeline support for getEventTimeline; it's read when the room is created
+                        client!.timelineSupport = true;
+                        mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                            timeline: [fromCarol],
+                            required_state: [create, mkMember(roomId, carol, "Carol")],
+                            name: "Expanded senders",
+                            initial: true,
+                        });
+                        await emitPromise(client!, ClientEvent.Room);
+                        const room = client!.getRoom(roomId)!;
+
+                        // Load the event before the latest one with /context, which with lazy loading members only
+                        // has the member event for that event's sender
+                        httpBackend!.when("GET", `/context/${encodeURIComponent(fromBob.event_id)}`).respond(200, {
+                            event: fromBob,
+                            events_before: [],
+                            events_after: [],
+                            state: [mkMember(roomId, bob, "Bob")],
+                            start: "start_token",
+                            end: "end_token",
+                        });
+                        const contextTimeline = client!.getEventTimeline(
+                            room.getUnfilteredTimelineSet(),
+                            fromBob.event_id,
+                        );
+                        await httpBackend!.flushAllExpected();
+                        await contextTimeline;
+                        client!.timelineSupport = false;
+
+                        mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                            timeline: [olderFromBob, olderFromCarol, fromBob, fromCarol],
+                            required_state: [create, mkMember(roomId, bob, "Bob"), mkMember(roomId, carol, "Carol")],
+                            name: "Expanded senders",
+                            expanded_timeline: true,
+                        });
+                        await flushPromises();
+
+                        expect(getSender(room, olderFromBob.event_id)).toEqual({ name: "Bob", hasMemberEvent: true });
+                        expect(getSender(room, olderFromCarol.event_id)).toEqual({
+                            name: "Carol",
+                            hasMemberEvent: true,
+                        });
+                        expect(getSender(room, fromBob.event_id)).toEqual({ name: "Bob", hasMemberEvent: true });
+                        expect(getSender(room, fromCarol.event_id)).toEqual({ name: "Carol", hasMemberEvent: true });
+                    });
+                });
             });
         });
     });

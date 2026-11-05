@@ -705,7 +705,20 @@ export class SlidingSyncSdk {
             }
             timelineEvents = newEvents;
             if (oldEvents.length > 0) {
-                // old events are scrollback, insert them now
+                // Old events are scrollback, insert them now. They take their senders from the start state of the
+                // timeline they're added to, which may not yet have the members from `required_state`: either the
+                // live timeline (which only gets `required_state` later, in `injectRoomEvents`), or a timeline
+                // created by `/context` that we join up with when we reach an event it already holds. Add any
+                // missing state to those timelines first, without overwriting what they already have.
+                const timelineSet = room.getUnfilteredTimelineSet();
+                const timelines = new Set([room.getLiveTimeline()]);
+                for (const event of oldEvents) {
+                    const timeline = timelineSet.getTimelineForEvent(event.getId());
+                    if (timeline) timelines.add(timeline);
+                }
+                for (const timeline of timelines) {
+                    timeline.getState(EventTimeline.BACKWARDS)?.setUnknownStateEvents(stateEvents);
+                }
                 room.addEventsToTimeline(oldEvents, true, false, room.getLiveTimeline(), roomData.prev_batch);
             }
         }
